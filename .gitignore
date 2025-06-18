@@ -1,0 +1,13 @@
+.bash_history
+.cache
+.cargo
+.local
+.nix-defexpr
+.ssh
+target
+.nix-channels
+.nix-profile
+xpdf-v3-02/xpdf
+xpdf-v3-02/corpus
+xpdf-v3-02/.devenv
+xpdf-v3-02/.devenv.flake.nix

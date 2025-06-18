@@ -28,31 +28,59 @@
   tasks = {
   	"bash:download_xpdf" = {
 	  exec = ''
+	  if [ -d "xpdf" ]; then
+	    rm -r xpdf 
+	  fi
 	  wget https://dl.xpdfreader.com/old/xpdf-3.02.tar.gz
 	  tar xvf xpdf-3.02.tar.gz
 	  rm xpdf-3.02.tar.gz
 	  mv xpdf-3.02 xpdf
 	  '';
+	};
+
+	"bash:corpus" = {
+	exec = ''
+	  if [ -d "corpus" ]; then
+	    rm -r corpus
+	  fi
+
+	  mkdir corpus
+	  cd corpus
+	  wget https://github.com/mozilla/pdf.js-sample-files/raw/master/helloworld.pdf
+	  wget https://samplepdffile.com/1mb-sample-pdf-file 1mb-sample-pdf-file.pdf
+	  wget https://www.melbpc.org.au/wp-content/uploads/2017/10/small-example-pdf-file.pdf
+	'';
 
 	};
 
-	"bash:make_xpdf" = {
+	 "bash:make_xpdf" = {
 		exec = ''
-		  $DEVENV_ROOT
-	  ''
+		  cd $DEVENV_ROOT/xpdf
+		  if [ -d "install" ]; then
+		  make clean
+		  rm -r install
+		  fi
+		  ./configure --prefix=$DEVENV_ROOT/xpdf/install
+		  make
+		  make install
+	  '';
+	  };
+	  "bash:cargo_build" = {
+	  	exec = ''
+		cargo build
+		'';
+
 	  };
 
+	  "bash:build_fuzzer" = {
+	  	exec = ''
+		cargo build --release
+		'';
+
+	  };
 
   };
 
-
-  scripts.corpus.exec = ''
-  mkdir corpus
-  cd corpus
-  wget https://github.com/mozilla/pdf.js-sample-files/raw/master/helloworld.pdf
-  wget http://www.africau.edu/images/default/sample.pdf
-  wget https://www.melbpc.org.au/wp-content/uploads/2017/10/small-example-pdf-file.pdf
-  '';
 
 
   enterShell = ''
