@@ -1,9 +1,11 @@
-use libafl::bolts::current_nanos;
-use libafl::bolts::rands::StdRand;
-use libafl::bolts::shmem::{ShMem, ShMemProvider, StdShMemProvider};
-use libafl::bolts::tuples::tuple_list;
+use libafl_bolts::current_nanos;
+use libafl_bolts::rands::StdRand;
+use libafl_bolts::shmem::{ShMem, ShMemProvider, StdShMemProvider};
+use libafl_bolts::tuples::tuple_list;
 use libafl::corpus::{
-    Corpus, InMemoryCorpus, IndexesLenTimeMinimizerCorpusScheduler, OnDiskCorpus,
+    Corpus, 
+    InMemoryCorpus, 
+    OnDiskCorpus,
     QueueCorpusScheduler,
 };
 use libafl::events::SimpleEventManager;
@@ -15,6 +17,7 @@ use libafl::observers::{ConstMapObserver, HitcountsMapObserver, TimeObserver};
 use libafl::stages::StdMutationalStage;
 use libafl::state::{HasCorpus, StdState};
 use libafl::stats::SimpleStats;
+use libafl::schedulers::minimizer::MinimizerScheduler;
 use libafl::{feedback_and_fast, feedback_or, Fuzzer, StdFuzzer};
 use std::path::PathBuf;
 
@@ -40,7 +43,7 @@ fn main() {
         OnDiskCorpus::new(PathBuf::from("./timeouts")).expect("Could not create timeouts corpus");
 
     //
-    // Component: Observer
+    // Component: Observe
     //
 
     // A Shared Memory Provider which uses `shmget`/`shmat`/`shmctl` to provide shared
@@ -49,7 +52,7 @@ fn main() {
     let mut shmem = StdShMemProvider::new().unwrap().new_map(MAP_SIZE).unwrap();
 
     // save the shared memory id to the environment, so that the forkserver knows about it; the
-    // ShMemId is populated as part of the implementor of the ShMem trait
+    // StMemId is populated as part of the implementor of the ShMem trait
     shmem
         .write_to_env("__AFL_SHM_ID")
         .expect("couldn't write shared memory ID");
@@ -156,7 +159,7 @@ fn main() {
     // entries registered in the MapIndexesMetadata
     //
     // a QueueCorpusScheduler walks the corpus in a queue-like fashion
-    let scheduler = IndexesLenTimeMinimizerCorpusScheduler::new(QueueCorpusScheduler::new());
+    let scheduler = MinimizerScheduler::new(QueueCorpusScheduler::new());
 
     //
     // Component: Fuzzer
