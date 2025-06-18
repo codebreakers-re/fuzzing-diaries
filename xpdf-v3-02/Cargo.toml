@@ -1,0 +1,9 @@
+[package]
+name = "xpdf-v3-02"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+libafl = { version = "0.15.3" }
+libafl_bolts = { version = "0.15.3" }
