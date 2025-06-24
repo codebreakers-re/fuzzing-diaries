@@ -5,6 +5,7 @@
 .nix-defexpr
 .ssh
 target
+terraform/.terraform/providers
 .nix-channels
 .nix-profile
 xpdf-v3-02/xpdf
