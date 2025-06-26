@@ -1,26 +1,26 @@
-use libafl_bolts::current_nanos;
-use libafl_bolts::rands::StdRand;
-use libafl_bolts::shmem::{ShMem, ShMemProvider, StdShMemProvider};
-use libafl_bolts::tuples::tuple_list;
-use libafl::corpus::{
-    Corpus, 
-    InMemoryCorpus, 
-    OnDiskCorpus,
-    QueueCorpusScheduler,
+use libafl::{
+    corpus::{Corpus, InMemoryCorpus, OnDiskCorpus},
+    events::SimpleEventManager,
+    executors::{ForkserverExecutor, StdChildArgs},
+    feedback_and, feedback_or,
+    feedbacks::{MapFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
+    inputs::BytesInput,
+    mutators::{havoc_mutations, StdMutator},
+    observers::{ConstMapObserver, HitcountsMapObserver, TimeObserver},
+    schedulers::QueueScheduler,
+    stages::StdMutationalStage,
+    state::{HasCorpus, StdState},
+    monitors::SimpleMonitor as SimpleStats,
+    Fuzzer, StdFuzzer,
 };
-use libafl::events::SimpleEventManager;
-use libafl::executors::{ForkserverExecutor, TimeoutForkserverExecutor};
-use libafl::feedbacks::{MapFeedbackState, MaxMapFeedback, TimeFeedback, TimeoutFeedback};
-use libafl::inputs::BytesInput;
-use libafl::mutators::{havoc_mutations, StdScheduledMutator};
-use libafl::observers::{ConstMapObserver, HitcountsMapObserver, TimeObserver};
-use libafl::stages::StdMutationalStage;
-use libafl::state::{HasCorpus, StdState};
-use libafl::stats::SimpleStats;
-use libafl::schedulers::minimizer::MinimizerScheduler;
-use libafl::{feedback_and_fast, feedback_or, Fuzzer, StdFuzzer};
+use libafl_bolts::{
+    current_nanos,
+    rands::StdRand,
+    shmem::{ShMem, ShMemProvider, StdShMemProvider},
+    tuples::tuple_list,
+    StdTargetArgs,
+};
 use std::path::PathBuf;
-
 use std::time::Duration;
 
 /// Size of coverage map shared between observer and executor
@@ -49,7 +49,8 @@ fn main() {
     // A Shared Memory Provider which uses `shmget`/`shmat`/`shmctl` to provide shared
     // memory mappings. The provider is used to ... provide ... a coverage map that is then
     // shared between the Observer and the Executor
-    let mut shmem = StdShMemProvider::new().unwrap().new_map(MAP_SIZE).unwrap();
+    let shmem_provider = StdShMemProvider::new().unwrap();
+    let mut shmem = shmem_provider.new_shmem(MAP_SIZE).unwrap();
 
     // save the shared memory id to the environment, so that the forkserver knows about it; the
     // StMemId is populated as part of the implementor of the ShMem trait
@@ -58,7 +59,8 @@ fn main() {
         .expect("couldn't write shared memory ID");
 
     // this is the actual shared map, as a &mut [u8]
-    let mut shmem_map = shmem.map_mut();
+    let mut shmem_map = shmem.as_mut();
+    let shmem_map = shmem_map.try_into().expect("Failed to convert slice to array");
 
     // Create an observation channel using the coverage map; since MAP_SIZE is known at compile
     // time, we can use ConstMapObserver to speed up Feedback::is_interesting
@@ -77,7 +79,7 @@ fn main() {
     // This is the state of the data that the feedback wants to persist in the fuzzers's state. In
     // particular, it is the cumulative map holding all the edges seen so far that is used to track
     // edge coverage.
-    let feedback_state = MapFeedbackState::with_observer(&edges_observer);
+    let feedback_state = MapFeedback::new(&edges_observer);
 
     // A Feedback, in most cases, processes the information reported by one or more observers to
     // decide if the execution is interesting. This one is composed of two Feedbacks using a logical
@@ -87,33 +89,18 @@ fn main() {
     // we need to use it alongside some other Feedback that has the ability to perform said
     // classification. These two feedbacks are combined to create a boolean formula, i.e. if the
     // input triggered a new code path, OR, false.
-    let feedback = feedback_or!(
-        // New maximization map feedback (attempts to maximize the map contents) linked to the
-        // edges observer and the feedback state. This one will track indexes, but will not track
-        // novelties, i.e. new_tracking(... true, false).
-        MaxMapFeedback::new_tracking(&feedback_state, &edges_observer, true, false),
-        // Time feedback, this one does not need a feedback state, nor does it ever return true for
-        // is_interesting, However, it does keep track of testcase execution time by way of its
-        // TimeObserver
-        TimeFeedback::new_with_observer(&time_observer)
+    let mut feedback = feedback_or!(
+        MaxMapFeedback::new(&edges_observer),
+        TimeFeedback::new(&time_observer)
     );
 
     // create a new map feedback state with a history map of size MAP_SIZE which provides state
     // about the edges feedback for timeouts
-    let objective_state = MapFeedbackState::new("timeout_edges", MAP_SIZE);
-
-    // A feedback is used to choose if an input should be added to the corpus or not. In the case
-    // below, we're saying that in order for a testcase's input to be added to the corpus, it must:
-    //   1: be a timeout
-    //        AND
-    //   2: have created new coverage of the binary under test
-    //
-    // The goal is to do similar deduplication to what AFL does
-    let objective = feedback_and_fast!(
+    let mut objective = feedback_and!(
         // A TimeoutFeedback reports as "interesting" if the exits via a Timeout
         TimeoutFeedback::new(),
         // Combined with the requirement for new coverage over timeouts
-        MaxMapFeedback::new(&objective_state, &edges_observer)
+        MaxMapFeedback::new(&edges_observer)
     );
 
     //
@@ -126,10 +113,9 @@ fn main() {
         StdRand::with_seed(current_nanos()),
         input_corpus,
         timeouts_corpus,
-        // States of the feedbacks that store the data related to the feedbacks that should be
-        // persisted in the State.
-        tuple_list!(feedback_state, objective_state),
-    );
+        &mut feedback,
+        &mut objective,
+    ).unwrap();
 
     //
     // Component: Stats
@@ -159,7 +145,7 @@ fn main() {
     // entries registered in the MapIndexesMetadata
     //
     // a QueueCorpusScheduler walks the corpus in a queue-like fashion
-    let scheduler = MinimizerScheduler::new(QueueCorpusScheduler::new());
+    let scheduler = QueueScheduler::new();
 
     //
     // Component: Fuzzer
@@ -175,18 +161,12 @@ fn main() {
     // Create the executor for the forkserver. The TimeoutForkserverExecutor wraps the standard
     // ForkserverExecutor and sets a timeout before each run. This gives us an executor
     // that implements an AFL-like mechanism that will spawn child processes to fuzz
-    let fork_server = ForkserverExecutor::new(
-        "./xpdf/install/bin/pdftotext".to_string(),
-        &[String::from("@@")],
-        // we're passing testcases via on-disk file; set to use_shmem_testcase to false
-        false,
-        tuple_list!(edges_observer, time_observer),
-    ).unwrap();
-
-    let timeout = Duration::from_millis(5000);
-
-    // ./pdftotext @@
-    let mut executor = TimeoutForkserverExecutor::new(fork_server, timeout)
+    let mut executor = ForkserverExecutor::builder()
+        .program("./xpdf/install/bin/pdftotext".to_string())
+        .args(&[String::from("@@")])
+        .shmem_provider(&mut shmem_provider)
+        .timeout(Duration::from_millis(5000))
+        .build(tuple_list!(edges_observer, time_observer))
         .unwrap();
 
     // In case the corpus is empty (i.e. on first run), load existing test cases from on-disk
@@ -208,7 +188,7 @@ fn main() {
     //
 
     // Setup a mutational stage with a basic bytes mutator
-    let mutator = StdScheduledMutator::new(havoc_mutations());
+    let mutator = StdMutator::new(havoc_mutations());
 
     //
     // Component: Stage

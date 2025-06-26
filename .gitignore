@@ -12,3 +12,13 @@ xpdf-v3-02/xpdf
 xpdf-v3-02/corpus
 xpdf-v3-02/.devenv
 xpdf-v3-02/.devenv.flake.nix
+
+# Devenv
+.devenv*
+devenv.local.nix
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
