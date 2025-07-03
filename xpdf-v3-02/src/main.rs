@@ -3,9 +3,9 @@ use libafl::{
     events::SimpleEventManager,
     executors::{ForkserverExecutor, StdChildArgs},
     feedback_and, feedback_or,
-    feedbacks::{MapFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
+    feedbacks::{MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     inputs::BytesInput,
-    mutators::{havoc_mutations, StdMutator},
+    mutators::BitFlipMutator,
     observers::{ConstMapObserver, HitcountsMapObserver, TimeObserver},
     schedulers::QueueScheduler,
     stages::StdMutationalStage,
@@ -49,18 +49,20 @@ fn main() {
     // A Shared Memory Provider which uses `shmget`/`shmat`/`shmctl` to provide shared
     // memory mappings. The provider is used to ... provide ... a coverage map that is then
     // shared between the Observer and the Executor
-    let shmem_provider = StdShMemProvider::new().unwrap();
+    let mut shmem_provider = StdShMemProvider::new().unwrap();
     let mut shmem = shmem_provider.new_shmem(MAP_SIZE).unwrap();
 
     // save the shared memory id to the environment, so that the forkserver knows about it; the
     // StMemId is populated as part of the implementor of the ShMem trait
-    shmem
-        .write_to_env("__AFL_SHM_ID")
-        .expect("couldn't write shared memory ID");
+    unsafe {
+        shmem
+            .write_to_env("__AFL_SHM_ID")
+            .expect("couldn't write shared memory ID");
+    }
 
     // this is the actual shared map, as a &mut [u8]
-    let mut shmem_map = shmem.as_mut();
-    let shmem_map = shmem_map.try_into().expect("Failed to convert slice to array");
+    let shmem_map = shmem.as_mut();
+    let mut shmem_map = shmem_map.try_into().expect("Failed to convert slice to array");
 
     // Create an observation channel using the coverage map; since MAP_SIZE is known at compile
     // time, we can use ConstMapObserver to speed up Feedback::is_interesting
@@ -79,7 +81,7 @@ fn main() {
     // This is the state of the data that the feedback wants to persist in the fuzzers's state. In
     // particular, it is the cumulative map holding all the edges seen so far that is used to track
     // edge coverage.
-    let feedback_state = MapFeedback::new(&edges_observer);
+    // let feedback_state = MapFeedback::with_name("edges", &edges_observer);
 
     // A Feedback, in most cases, processes the information reported by one or more observers to
     // decide if the execution is interesting. This one is composed of two Feedbacks using a logical
@@ -188,7 +190,7 @@ fn main() {
     //
 
     // Setup a mutational stage with a basic bytes mutator
-    let mutator = StdMutator::new(havoc_mutations());
+    let mutator = BitFlipMutator::new();
 
     //
     // Component: Stage
