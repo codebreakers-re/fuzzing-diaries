@@ -5,12 +5,12 @@ use libafl::{
     feedback_and, feedback_or,
     feedbacks::{MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     inputs::BytesInput,
+    monitors::SimpleMonitor as SimpleStats,
     mutators::BitFlipMutator,
     observers::{ConstMapObserver, HitcountsMapObserver, TimeObserver},
     schedulers::QueueScheduler,
     stages::StdMutationalStage,
     state::{HasCorpus, StdState},
-    monitors::SimpleMonitor as SimpleStats,
     Fuzzer, StdFuzzer,
 };
 use libafl_bolts::{
@@ -32,7 +32,28 @@ fn main() {
     //
 
     // path to input corpus
-    let corpus_dirs = vec![PathBuf::from("./corpus")];
+    let corpus_dir = PathBuf::from("./corpus");
+
+    // Check if corpus directory exists and has files
+    if !corpus_dir.exists() {
+        panic!("Corpus directory does not exist: {:?}", corpus_dir);
+    }
+    if !corpus_dir.is_dir() {
+        panic!("Corpus path is not a directory: {:?}", corpus_dir);
+    }
+
+    let entries = std::fs::read_dir(&corpus_dir)
+        .expect("Failed to read corpus directory")
+        .count();
+
+    if entries == 0 {
+        panic!("Corpus directory is empty: {:?}", corpus_dir);
+    }
+
+    println!(
+        "Found {} files in corpus directory: {:?}",
+        entries, corpus_dir
+    );
 
     // Corpus that will be evolved, we keep it in memory for performance
     let input_corpus = InMemoryCorpus::<BytesInput>::new();
@@ -62,7 +83,9 @@ fn main() {
 
     // this is the actual shared map, as a &mut [u8]
     let shmem_map = shmem.as_mut();
-    let mut shmem_map = shmem_map.try_into().expect("Failed to convert slice to array");
+    let mut shmem_map = shmem_map
+        .try_into()
+        .expect("Failed to convert slice to array");
 
     // Create an observation channel using the coverage map; since MAP_SIZE is known at compile
     // time, we can use ConstMapObserver to speed up Feedback::is_interesting
@@ -92,7 +115,7 @@ fn main() {
     // classification. These two feedbacks are combined to create a boolean formula, i.e. if the
     // input triggered a new code path, OR, false.
     let mut feedback = feedback_or!(
-        MaxMapFeedback::new(&edges_observer),
+        MaxMapFeedback::with_name("main_feedback", &edges_observer),
         TimeFeedback::new(&time_observer)
     );
 
@@ -102,7 +125,7 @@ fn main() {
         // A TimeoutFeedback reports as "interesting" if the exits via a Timeout
         TimeoutFeedback::new(),
         // Combined with the requirement for new coverage over timeouts
-        MaxMapFeedback::new(&edges_observer)
+        MaxMapFeedback::with_name("objective_feedback", &edges_observer)
     );
 
     //
@@ -117,7 +140,8 @@ fn main() {
         timeouts_corpus,
         &mut feedback,
         &mut objective,
-    ).unwrap();
+    )
+    .unwrap();
 
     //
     // Component: Stats
@@ -168,6 +192,7 @@ fn main() {
         .args(&[String::from("@@")])
         .shmem_provider(&mut shmem_provider)
         .timeout(Duration::from_millis(5000))
+        .coverage_map_size(MAP_SIZE)
         .build(tuple_list!(edges_observer, time_observer))
         .unwrap();
 
@@ -175,13 +200,16 @@ fn main() {
     // corpus
     if state.corpus().count() < 1 {
         state
-            .load_initial_inputs(&mut fuzzer, &mut executor, &mut mgr, &corpus_dirs)
+            .load_initial_inputs(&mut fuzzer, &mut executor, &mut mgr, &[corpus_dir.clone()])
             .unwrap_or_else(|err| {
                 panic!(
                     "Failed to load initial corpus at {:?}: {:?}",
-                    &corpus_dirs, err
+                    &corpus_dir, err
                 )
             });
+        if state.corpus().count() < 1 {
+            panic!("Corpus is empty this is likely an bug")
+        }
         println!("We imported {} inputs from disk.", state.corpus().count());
     }
 

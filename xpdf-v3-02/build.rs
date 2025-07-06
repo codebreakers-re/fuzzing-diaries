@@ -8,7 +8,6 @@ fn main() {
     let cwd = env::current_dir().unwrap().to_string_lossy().to_string();
     let xpdf_dir = format!("{}/xpdf", cwd);
 
-
     // make clean; remove any leftover gunk from prior builds
     Command::new("make")
         .arg("clean")
@@ -27,15 +26,14 @@ fn main() {
         .expect("Couldn't clean xpdf's install directory");
 
     unsafe {
-
         env::set_var("LLVM_CONFIG", "llvm-config-19");
     };
 
     // configure with afl-clang-fast and set install directory to ./xpdf/install
     Command::new("./configure")
         .arg(&format!("--prefix={}/install", xpdf_dir))
-        .env("CC", "/usr/local/bin/afl-clang-fast")
-        .env("CXX", "/usr/local/bin/afl-clang-fast++")
+        .env("CC", "afl-clang-fast")
+        .env("CXX", "afl-clang-fast++")
         .current_dir(xpdf_dir.clone())
         .status()
         .expect("Couldn't configure xpdf to build using afl-clang-fast");
