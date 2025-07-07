@@ -5,7 +5,7 @@ use libafl::{
     feedback_and, feedback_or,
     feedbacks::{MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     inputs::BytesInput,
-    monitors::SimpleMonitor as SimpleStats,
+    monitors::tui::TuiMonitor,
     mutators::BitFlipMutator,
     observers::{ConstMapObserver, HitcountsMapObserver, TimeObserver},
     schedulers::QueueScheduler,
@@ -149,7 +149,10 @@ fn main() {
 
     // call println with SimpleStats::display as input to report to the terminal. introspection
     // feature flag can be added for additional stats
-    let stats = SimpleStats::new(|s| println!("{}", s));
+    let stats = TuiMonitor::builder()
+        .title("XPDF Fuzzer")
+        .enhanced_graphics(true)
+        .build();
 
     //
     // Component: EventManager
