@@ -200,7 +200,7 @@ fn main() {
     // corpus
     if state.corpus().count() < 1 {
         state
-            .load_initial_inputs(&mut fuzzer, &mut executor, &mut mgr, &[corpus_dir.clone()])
+            .load_initial_inputs_forced(&mut fuzzer, &mut executor, &mut mgr, &[corpus_dir.clone()])
             .unwrap_or_else(|err| {
                 panic!(
                     "Failed to load initial corpus at {:?}: {:?}",

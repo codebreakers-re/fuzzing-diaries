@@ -47,8 +47,11 @@
 	  mkdir corpus
 	  cd corpus
 	  wget https://github.com/mozilla/pdf.js-sample-files/raw/master/helloworld.pdf
-	  wget https://samplepdffile.com/1mb-sample-pdf-file 1mb-sample-pdf-file.pdf
+	  wget https://samplepdffile.com/1mb-sample-pdf-file -O 1mb-sample-pdf-file.pdf
 	  wget https://www.melbpc.org.au/wp-content/uploads/2017/10/small-example-pdf-file.pdf
+	  wget https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf
+	  wget https://www.adobe.com/content/dam/acom/en/devnet/acrobat/pdfs/pdf_open_parameters.pdf
+	  echo "Downloaded 5 PDF files to corpus directory"
 	'';
 
 	};
