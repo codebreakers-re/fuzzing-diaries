@@ -1,14 +1,14 @@
 use libafl::{
     corpus::{Corpus, InMemoryCorpus, OnDiskCorpus},
     events::SimpleEventManager,
-    executors::{ForkserverExecutor, StdChildArgs},
-    feedback_and, feedback_or,
-    feedbacks::{MaxMapFeedback, TimeFeedback, TimeoutFeedback},
+    executors::{forkserver::ForkserverExecutor, HasObservers, StdChildArgs},
+    feedback_and, feedback_and_fast, feedback_or,
+    feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     inputs::BytesInput,
     monitors::tui::TuiMonitor,
-    mutators::BitFlipMutator,
-    observers::{ConstMapObserver, HitcountsMapObserver, TimeObserver},
-    schedulers::QueueScheduler,
+    mutators::{havoc_mutations, scheduled::HavocScheduledMutator, tokens_mutations, Tokens},
+    observers::{CanTrack, ConstMapObserver, HitcountsMapObserver, StdMapObserver, TimeObserver},
+    schedulers::{IndexesLenTimeMinimizerScheduler, QueueScheduler},
     stages::StdMutationalStage,
     state::{HasCorpus, StdState},
     Fuzzer, StdFuzzer,
@@ -16,15 +16,15 @@ use libafl::{
 use libafl_bolts::{
     current_nanos,
     rands::StdRand,
-    shmem::{ShMem, ShMemProvider, StdShMemProvider},
-    tuples::tuple_list,
-    StdTargetArgs,
+    shmem::{ShMem, ShMemProvider, UnixShMemProvider},
+    tuples::{tuple_list, Handled, Merge},
+    AsSliceMut, StdTargetArgs,
 };
 use std::path::PathBuf;
 use std::time::Duration;
 
 /// Size of coverage map shared between observer and executor
-const MAP_SIZE: usize = 65536;
+const MAP_SIZE: usize = 2097152;
 
 fn main() {
     //
@@ -32,27 +32,27 @@ fn main() {
     //
 
     // path to input corpus
-    let corpus_dir = PathBuf::from("./corpus");
+    let corpus_dirs = vec![PathBuf::from("./corpus")];
 
     // Check if corpus directory exists and has files
-    if !corpus_dir.exists() {
-        panic!("Corpus directory does not exist: {:?}", corpus_dir);
+    if !corpus_dirs[0].exists() {
+        panic!("Corpus directory does not exist: {:?}", corpus_dirs[0]);
     }
-    if !corpus_dir.is_dir() {
-        panic!("Corpus path is not a directory: {:?}", corpus_dir);
+    if !corpus_dirs[0].is_dir() {
+        panic!("Corpus path is not a directory: {:?}", corpus_dirs[0]);
     }
 
-    let entries = std::fs::read_dir(&corpus_dir)
+    let entries = std::fs::read_dir(&corpus_dirs[0])
         .expect("Failed to read corpus directory")
         .count();
 
     if entries == 0 {
-        panic!("Corpus directory is empty: {:?}", corpus_dir);
+        panic!("Corpus directory is empty: {:?}", corpus_dirs[0]);
     }
 
     println!(
         "Found {} files in corpus directory: {:?}",
-        entries, corpus_dir
+        entries, corpus_dirs[0]
     );
 
     // Corpus that will be evolved, we keep it in memory for performance
@@ -70,7 +70,7 @@ fn main() {
     // A Shared Memory Provider which uses `shmget`/`shmat`/`shmctl` to provide shared
     // memory mappings. The provider is used to ... provide ... a coverage map that is then
     // shared between the Observer and the Executor
-    let mut shmem_provider = StdShMemProvider::new().unwrap();
+    let mut shmem_provider = UnixShMemProvider::new().unwrap();
     let mut shmem = shmem_provider.new_shmem(MAP_SIZE).unwrap();
 
     // save the shared memory id to the environment, so that the forkserver knows about it; the
@@ -82,50 +82,41 @@ fn main() {
     }
 
     // this is the actual shared map, as a &mut [u8]
-    let shmem_map = shmem.as_mut();
-    let mut shmem_map = shmem_map
-        .try_into()
-        .expect("Failed to convert slice to array");
-
+    let shmem_buf = shmem.as_slice_mut();
+    // let mut shmem_map = shmem_buf
+    //     .try_into()
+    //     .expect("Failed to convert slice to array");
+    //
     // Create an observation channel using the coverage map; since MAP_SIZE is known at compile
     // time, we can use ConstMapObserver to speed up Feedback::is_interesting
-    let edges_observer = HitcountsMapObserver::new(ConstMapObserver::<_, MAP_SIZE>::new(
-        "shared_mem",
-        &mut shmem_map,
-    ));
+    let edges_observer = unsafe {
+        HitcountsMapObserver::new(StdMapObserver::new("shared_mem", shmem_buf)).track_indices()
+    };
 
     // Create an observation channel to keep track of the execution time and previous runtime
     let time_observer = TimeObserver::new("time");
 
     //
-    // Component: Feedback
-    //
-
-    // This is the state of the data that the feedback wants to persist in the fuzzers's state. In
-    // particular, it is the cumulative map holding all the edges seen so far that is used to track
-    // edge coverage.
-    // let feedback_state = MapFeedback::with_name("edges", &edges_observer);
-
-    // A Feedback, in most cases, processes the information reported by one or more observers to
-    // decide if the execution is interesting. This one is composed of two Feedbacks using a logical
-    // OR.
-    //
-    // Due to the fact that TimeFeedback can never classify a testcase as interesting on its own,
-    // we need to use it alongside some other Feedback that has the ability to perform said
-    // classification. These two feedbacks are combined to create a boolean formula, i.e. if the
-    // input triggered a new code path, OR, false.
     let mut feedback = feedback_or!(
-        MaxMapFeedback::with_name("main_feedback", &edges_observer),
+        MaxMapFeedback::new(&edges_observer),
         TimeFeedback::new(&time_observer)
     );
 
     // create a new map feedback state with a history map of size MAP_SIZE which provides state
     // about the edges feedback for timeouts
-    let mut objective = feedback_and!(
+
+    // A feedback is used to choose if an input should be added to the corpus or not. In the case
+    // below, we're saying that in order for a testcase's input to be added to the corpus, it must:
+    //   1: be a timeout
+    //        AND
+    //   2: have created new coverage of the binary under test
+    //
+    // The goal is to do similar deduplication to what AFL does
+    let mut objective = feedback_and_fast!(
         // A TimeoutFeedback reports as "interesting" if the exits via a Timeout
-        TimeoutFeedback::new(),
+        CrashFeedback::new(),
         // Combined with the requirement for new coverage over timeouts
-        MaxMapFeedback::with_name("objective_feedback", &edges_observer)
+        MaxMapFeedback::with_name("mapfeedback_metadata_objective", &edges_observer)
     );
 
     //
@@ -138,6 +129,8 @@ fn main() {
         StdRand::with_seed(current_nanos()),
         input_corpus,
         timeouts_corpus,
+        // States of the feedbacks that store the data related to the feedbacks that should be
+        // persisted in the State.
         &mut feedback,
         &mut objective,
     )
@@ -149,7 +142,7 @@ fn main() {
 
     // call println with SimpleStats::display as input to report to the terminal. introspection
     // feature flag can be added for additional stats
-    let stats = TuiMonitor::builder()
+    let monitor = TuiMonitor::builder()
         .title("XPDF Fuzzer")
         .enhanced_graphics(true)
         .build();
@@ -160,7 +153,7 @@ fn main() {
 
     // The event manager handles the various events generated during the fuzzing loop
     // such as the notification of the addition of a new testcase to the corpus
-    let mut mgr = SimpleEventManager::new(stats);
+    let mut mgr = SimpleEventManager::new(monitor);
 
     //
     // Component: Scheduler
@@ -170,11 +163,10 @@ fn main() {
     //
     // IndexesLenTimeMinimizerCorpusScheduler is a MinimizerCorpusScheduler with a
     // LenTimeMulFavFactor that prioritizes quick and small Testcases that exercise all the
-
     // entries registered in the MapIndexesMetadata
     //
     // a QueueCorpusScheduler walks the corpus in a queue-like fashion
-    let scheduler = QueueScheduler::new();
+    let scheduler = IndexesLenTimeMinimizerScheduler::new(&edges_observer, QueueScheduler::new());
 
     //
     // Component: Fuzzer
@@ -183,17 +175,14 @@ fn main() {
     // A fuzzer with feedback, objectives, and a corpus scheduler
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
 
-    //
-    // Component: Executor
-    //
+    // let observer_ref = edges_observer.handle();
 
-    // Create the executor for the forkserver. The TimeoutForkserverExecutor wraps the standard
-    // ForkserverExecutor and sets a timeout before each run. This gives us an executor
-    // that implements an AFL-like mechanism that will spawn child processes to fuzz
+    let mut tokens = Tokens::new();
     let mut executor = ForkserverExecutor::builder()
         .program("./xpdf/install/bin/pdftotext".to_string())
-        .args(&[String::from("@@")])
+        .debug_child(false) // send programs stdout to /dev/null
         .shmem_provider(&mut shmem_provider)
+        .autotokens(&mut tokens)
         .timeout(Duration::from_millis(5000))
         .coverage_map_size(MAP_SIZE)
         .build(tuple_list!(edges_observer, time_observer))
@@ -201,13 +190,19 @@ fn main() {
 
     // In case the corpus is empty (i.e. on first run), load existing test cases from on-disk
     // corpus
-    if state.corpus().count() < 1 {
+    // if let Some(dynamic_map_size) = executor.coverage_map_size() {
+    //     executor.observers_mut()[&observer_ref]
+    //         .as_mut()
+    //         .truncate(dynamic_map_size);
+    // }
+
+    if state.must_load_initial_inputs() {
         state
-            .load_initial_inputs_forced(&mut fuzzer, &mut executor, &mut mgr, &[corpus_dir.clone()])
+            .load_initial_inputs(&mut fuzzer, &mut executor, &mut mgr, &corpus_dirs)
             .unwrap_or_else(|err| {
                 panic!(
                     "Failed to load initial corpus at {:?}: {:?}",
-                    &corpus_dir, err
+                    &corpus_dirs, err
                 )
             });
         if state.corpus().count() < 1 {
@@ -221,7 +216,8 @@ fn main() {
     //
 
     // Setup a mutational stage with a basic bytes mutator
-    let mutator = BitFlipMutator::new();
+    let mutator =
+        HavocScheduledMutator::with_max_stack_pow(havoc_mutations().merge(tokens_mutations()), 6);
 
     //
     // Component: Stage
