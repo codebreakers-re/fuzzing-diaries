@@ -18,7 +18,7 @@ use libafl_bolts::{
     rands::StdRand,
     shmem::{ShMem, ShMemProvider, UnixShMemProvider},
     tuples::{tuple_list, Handled, Merge},
-    AsSliceMut, StdTargetArgs,
+    AsSliceMut, StdTargetArgs, Truncate,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -169,7 +169,7 @@ fn main() {
     // A fuzzer with feedback, objectives, and a corpus scheduler
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
 
-    // let observer_ref = edges_observer.handle();
+    let observer_ref = edges_observer.handle();
 
     // Check if the target binary exists before creating executor
     let target_binary = "./xpdf/install/bin/pdftotext";
@@ -192,11 +192,11 @@ fn main() {
 
     // In case the corpus is empty (i.e. on first run), load existing tecst cases from on-disk
     // corpus
-    // if let Some(dynamic_map_size) = executor.coverage_map_size() {
-    //     executor.observers_mut()[&observer_ref]
-    //         .as_mut()
-    //         .truncate(dynamic_map_size);
-    // }
+    if let Some(dynamic_map_size) = executor.coverage_map_size() {
+        executor.observers_mut()[&observer_ref]
+            .as_mut()
+            .truncate(dynamic_map_size);
+    }
 
     if state.corpus().count() < 1 {
         println!("Loading initial corpus from {:?}...", &corpus_dirs);
@@ -238,14 +238,6 @@ fn main() {
     //
 
     let mut stages = tuple_list!(StdMutationalStage::new(mutator));
-
-    // Print configuration summary
-    println!("=== FUZZER CONFIGURATION ===");
-    println!("Target: {}", target_binary);
-    println!("Corpus: {} inputs loaded", state.corpus().count());
-    println!("Feedback: Coverage + Timing");
-    println!("Objectives: Crashes + Timeouts");
-    println!("=============================");
 
     // start the fuzzing
     fuzzer
