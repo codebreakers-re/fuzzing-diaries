@@ -2,7 +2,7 @@ use libafl::{
     corpus::{Corpus, InMemoryCorpus, OnDiskCorpus},
     events::SimpleEventManager,
     executors::{forkserver::ForkserverExecutor, HasObservers, StdChildArgs},
-    feedback_and, feedback_and_fast, feedback_or,
+    feedback_and, feedback_and_fast, feedback_or, feedback_or_fast,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     inputs::BytesInput,
     monitors::tui::TuiMonitor,
@@ -58,9 +58,13 @@ fn main() {
     // Corpus that will be evolved, we keep it in memory for performance
     let input_corpus = InMemoryCorpus::<BytesInput>::new();
 
-    // Corpus in which we store solutions (timeouts/hangs in this example),
+    // Corpus in which we store solutions (crashes in this example),
     // on disk so the user can get them after stopping the fuzzer
-    let timeouts_corpus =
+    let crashes_corpus =
+        OnDiskCorpus::new(PathBuf::from("./crashes")).expect("Could not create crashes corpus");
+
+    // Corpus for timeout cases - also stored on disk
+    let timeouts_corpus: OnDiskCorpus<BytesInput> =
         OnDiskCorpus::new(PathBuf::from("./timeouts")).expect("Could not create timeouts corpus");
 
     //
@@ -75,11 +79,7 @@ fn main() {
 
     // save the shared memory id to the environment, so that the forkserver knows about it; the
     // StMemId is populated as part of the implementor of the ShMem trait
-    unsafe {
-        shmem
-            .write_to_env("__AFL_SHM_ID")
-            .expect("couldn't write shared memory ID");
-    }
+    unsafe { shmem.write_to_env("__AFL_SHM_ID").unwrap() }
 
     // this is the actual shared map, as a &mut [u8]
     let shmem_buf = shmem.as_slice_mut();
@@ -96,27 +96,21 @@ fn main() {
     // Create an observation channel to keep track of the execution time and previous runtime
     let time_observer = TimeObserver::new("time");
 
-    //
-    let mut feedback = feedback_or!(
+    // Create feedback for corpus evolution - this determines which inputs get added to corpus
+    // Use both coverage and timing feedback for better corpus evolution
+    let mut feedback = feedback_and_fast!(
+        // Track coverage increases - this allows corpus growth
         MaxMapFeedback::new(&edges_observer),
+        // Prefer faster executions when coverage is similar
         TimeFeedback::new(&time_observer)
     );
 
-    // create a new map feedback state with a history map of size MAP_SIZE which provides state
-    // about the edges feedback for timeouts
-
-    // A feedback is used to choose if an input should be added to the corpus or not. In the case
-    // below, we're saying that in order for a testcase's input to be added to the corpus, it must:
-    //   1: be a timeout
-    //        AND
-    //   2: have created new coverage of the binary under test
-    //
-    // The goal is to do similar deduplication to what AFL does
-    let mut objective = feedback_and_fast!(
-        // A TimeoutFeedback reports as "interesting" if the exits via a Timeout
+    // Create feedback for objectives (crashes, timeouts) - these get saved to disk
+    let mut objective = feedback_or_fast!(
+        // CrashFeedback reports as "interesting" if the program crashes
         CrashFeedback::new(),
-        // Combined with the requirement for new coverage over timeouts
-        MaxMapFeedback::with_name("mapfeedback_metadata_objective", &edges_observer)
+        // TimeoutFeedback reports as "interesting" if the program times out
+        TimeoutFeedback::new()
     );
 
     //
@@ -128,7 +122,7 @@ fn main() {
         // random number generator with a time-based seed
         StdRand::with_seed(current_nanos()),
         input_corpus,
-        timeouts_corpus,
+        crashes_corpus,
         // States of the feedbacks that store the data related to the feedbacks that should be
         // persisted in the State.
         &mut feedback,
@@ -144,7 +138,7 @@ fn main() {
     // feature flag can be added for additional stats
     let monitor = TuiMonitor::builder()
         .title("XPDF Fuzzer")
-        .enhanced_graphics(true)
+        .enhanced_graphics(false)
         .build();
 
     //
@@ -177,18 +171,26 @@ fn main() {
 
     // let observer_ref = edges_observer.handle();
 
-    let mut tokens = Tokens::new();
+    // Check if the target binary exists before creating executor
+    let target_binary = "./xpdf/install/bin/pdftotext";
+    if !std::path::Path::new(target_binary).exists() {
+        panic!("Target binary does not exist: {}", target_binary);
+    }
+
+    println!("Creating executor with command: {} {}", target_binary, "@@");
+
     let mut executor = ForkserverExecutor::builder()
-        .program("./xpdf/install/bin/pdftotext".to_string())
-        .debug_child(false) // send programs stdout to /dev/null
+        .program(target_binary.to_string())
+        .parse_afl_cmdline(&["@@"])
+        .debug_child(false) // disable stdout capture
         .shmem_provider(&mut shmem_provider)
-        .autotokens(&mut tokens)
         .timeout(Duration::from_millis(5000))
         .coverage_map_size(MAP_SIZE)
+        .is_persistent(false) // ensure we're not in persistent mode
         .build(tuple_list!(edges_observer, time_observer))
         .unwrap();
 
-    // In case the corpus is empty (i.e. on first run), load existing test cases from on-disk
+    // In case the corpus is empty (i.e. on first run), load existing tecst cases from on-disk
     // corpus
     // if let Some(dynamic_map_size) = executor.coverage_map_size() {
     //     executor.observers_mut()[&observer_ref]
@@ -196,19 +198,32 @@ fn main() {
     //         .truncate(dynamic_map_size);
     // }
 
-    if state.must_load_initial_inputs() {
+    if state.corpus().count() < 1 {
+        println!("Loading initial corpus from {:?}...", &corpus_dirs);
+
         state
-            .load_initial_inputs(&mut fuzzer, &mut executor, &mut mgr, &corpus_dirs)
+            .load_initial_inputs_forced(&mut fuzzer, &mut executor, &mut mgr, &corpus_dirs)
             .unwrap_or_else(|err| {
                 panic!(
                     "Failed to load initial corpus at {:?}: {:?}",
                     &corpus_dirs, err
                 )
             });
+
         if state.corpus().count() < 1 {
-            panic!("Corpus is empty this is likely an bug")
+            panic!("Corpus is empty after loading - this is likely a bug")
         }
-        println!("We imported {} inputs from disk.", state.corpus().count());
+
+        println!(
+            "Successfully imported {} inputs from disk.",
+            state.corpus().count()
+        );
+        println!("Corpus loading complete. Starting fuzzing loop...");
+    } else {
+        println!(
+            "Using existing corpus with {} inputs.",
+            state.corpus().count()
+        );
     }
 
     //
@@ -216,14 +231,21 @@ fn main() {
     //
 
     // Setup a mutational stage with a basic bytes mutator
-    let mutator =
-        HavocScheduledMutator::with_max_stack_pow(havoc_mutations().merge(tokens_mutations()), 6);
+    let mutator = HavocScheduledMutator::new(havoc_mutations());
 
     //
     // Component: Stage
     //
 
     let mut stages = tuple_list!(StdMutationalStage::new(mutator));
+
+    // Print configuration summary
+    println!("=== FUZZER CONFIGURATION ===");
+    println!("Target: {}", target_binary);
+    println!("Corpus: {} inputs loaded", state.corpus().count());
+    println!("Feedback: Coverage + Timing");
+    println!("Objectives: Crashes + Timeouts");
+    println!("=============================");
 
     // start the fuzzing
     fuzzer
