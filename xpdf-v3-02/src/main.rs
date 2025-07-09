@@ -5,7 +5,7 @@ use libafl::{
     feedback_and, feedback_and_fast, feedback_or, feedback_or_fast,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     inputs::BytesInput,
-    monitors::tui::TuiMonitor,
+    monitors::{tui::TuiMonitor, SimpleMonitor},
     mutators::{havoc_mutations, scheduled::HavocScheduledMutator, tokens_mutations, Tokens},
     observers::{CanTrack, ConstMapObserver, HitcountsMapObserver, StdMapObserver, TimeObserver},
     schedulers::{IndexesLenTimeMinimizerScheduler, QueueScheduler},
@@ -136,10 +136,10 @@ fn main() {
 
     // call println with SimpleStats::display as input to report to the terminal. introspection
     // feature flag can be added for additional stats
-    let monitor = TuiMonitor::builder()
-        .title("XPDF Fuzzer")
-        .enhanced_graphics(false)
-        .build();
+    // let monitor = TuiMonitor::builder()
+    //     .title("XPDF Fuzzer")
+    //     .enhanced_graphics(true)
+    //     .build();
 
     //
     // Component: EventManager
@@ -147,6 +147,7 @@ fn main() {
 
     // The event manager handles the various events generated during the fuzzing loop
     // such as the notification of the addition of a new testcase to the corpus
+    let monitor = SimpleMonitor::new(|s| println!("{s}"));
     let mut mgr = SimpleEventManager::new(monitor);
 
     //
