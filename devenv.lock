@@ -115,7 +115,8 @@
         "nixpkgs": "nixpkgs",
         "pre-commit-hooks": [
           "git-hooks"
-        ]
+        ],
+        "rust-overlay": "rust-overlay"
       }
     },
     "rust-analyzer-src": {
@@ -131,6 +132,25 @@
         "owner": "rust-lang",
         "ref": "nightly",
         "repo": "rust-analyzer",
+        "type": "github"
+      }
+    },
+    "rust-overlay": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1756175826,
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "rev": "d137b47bde8a6783b961db81254013b454eab46a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "oxalica",
+        "repo": "rust-overlay",
         "type": "github"
       }
     }

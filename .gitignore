@@ -5,7 +5,11 @@
 .nix-defexpr
 .ssh
 target
-terraform/.terraform/providers
+# Terraform
+terraform/.terraform/
+!terraform/.terraform.lock.hcl
+# Keep all state files for all workspaces
+!terraform/terraform.tfstate*
 .nix-channels
 .nix-profile
 xpdf-v3-02/xpdf
@@ -22,3 +26,4 @@ devenv.local.nix
 
 # pre-commit
 .pre-commit-config.yaml
+*.tfvars

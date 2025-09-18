@@ -4,6 +4,11 @@ inputs:
     inputs:
       nixpkgs:
         follows: nixpkgs
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/rolling
 imports:
@@ -12,3 +17,5 @@ imports:
 
 nixpkgs:
   allowUnfree: true
+  config:
+    allowUnfree: true

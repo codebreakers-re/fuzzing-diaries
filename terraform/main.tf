@@ -5,6 +5,14 @@ terraform {
       source  = "hetznercloud/hcloud"
       version = "~> 1.45"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.2"
+    }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.12"
+    }
   }
 }
 
@@ -27,16 +35,15 @@ data "hcloud_datacenter" "nuremberg" {
 }
 
 
-data "hcloud_ssh_key" "github" {
-  name = "GITHUB ACTIONS"
+resource "hcloud_ssh_key" "terraform" {
+  name       = "terraform-fuzzer-${terraform.workspace}"
+  public_key = file("~/.ssh/id_ed25519_terraform.pub")
 }
 
-resource "tls_private_key" "exec_provider" {
-  algorithm = "ED25519"
-}
+
 
 resource "hcloud_primary_ip" "fuzzer" {
-  name          = "fuzzer_ip"
+  name          = "fuzzer_ip_${terraform.workspace}"
   datacenter    = data.hcloud_datacenter.nuremberg.name
   type          = "ipv4"
   assignee_type = "server"
@@ -44,13 +51,13 @@ resource "hcloud_primary_ip" "fuzzer" {
 }
 
 resource "hcloud_volume" "fuzzer01" {
-  name     = "fuzzer"
+  name     = "fuzzer_${terraform.workspace}"
   location = "nbg1"
   size     = 50
 }
 
 resource "hcloud_firewall" "fuzzer" {
-  name = "fuzzer-firewall"
+  name = "fuzzer-firewall-${terraform.workspace}"
 
   rule {
     direction = "in"
@@ -93,7 +100,7 @@ resource "hcloud_firewall" "fuzzer" {
 }
 
 resource "hcloud_server" "fuzzer" {
-  name        = "fuzzer"
+  name        = "fuzzer-${terraform.workspace}"
   image       = "ubuntu-22.04"
   server_type = var.server_type
   datacenter  = data.hcloud_datacenter.nuremberg.name
@@ -105,7 +112,7 @@ resource "hcloud_server" "fuzzer" {
   }
 
   ssh_keys = [
-    data.hcloud_ssh_key.github.id,
+    hcloud_ssh_key.terraform.id,
   ]
 
 
@@ -124,6 +131,47 @@ resource "hcloud_volume_attachment" "fuzzer" {
   volume_id = hcloud_volume.fuzzer01.id
   server_id = hcloud_server.fuzzer.id
   automount = true
+}
+
+resource "time_sleep" "wait_for_nixos_infect" {
+  depends_on = [
+    hcloud_server.fuzzer,
+    hcloud_volume_attachment.fuzzer
+  ]
+
+  create_duration = "5m"
+}
+
+resource "time_sleep" "retry_delay" {
+  create_duration = "2m"
+}
+
+resource "null_resource" "upload_binary" {
+  depends_on = [
+    time_sleep.wait_for_nixos_infect
+  ]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      echo "Compressing ${terraform.workspace} directory..."
+      cd .. && tar -czf ${terraform.workspace}.tar.gz --exclude='${terraform.workspace}/.devenv' ${terraform.workspace}/ && cd terraform
+      echo "Uploading compressed ${terraform.workspace}.tar.gz..."
+      scp -i ~/.ssh/id_ed25519_terraform -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        ../${terraform.workspace}.tar.gz \
+        root@${hcloud_primary_ip.fuzzer.ip_address}:/root/ || \
+      (echo "First attempt failed, waiting 2 more minutes..." && sleep 120 && \
+       scp -i ~/.ssh/id_ed25519_terraform -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+         ../${terraform.workspace}.tar.gz \
+         root@${hcloud_primary_ip.fuzzer.ip_address}:/root/)
+      echo "Extracting on remote server..."
+      ssh -i ~/.ssh/id_ed25519_terraform -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        root@${hcloud_primary_ip.fuzzer.ip_address} "cd /root && tar -xzf ${terraform.workspace}.tar.gz && rm ${terraform.workspace}.tar.gz"
+      echo "Uploading NixOS configuration..."
+      scp -i ~/.ssh/id_ed25519_terraform -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        ../nix/configuration.nix \
+        root@${hcloud_primary_ip.fuzzer.ip_address}:/etc/nixos/configuration.nix
+    EOT
+  }
 }
 
 output "fuzzer_ip" {
